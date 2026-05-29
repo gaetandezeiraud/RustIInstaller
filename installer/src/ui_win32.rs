@@ -64,8 +64,7 @@ const WIN_H: i32 = 500;
 const BANNER_H: i32 = 72;
 const PAD: i32 = 24;
 
-const ACCENT: u32 = 0x00C56C0F; // Windows 11 accent (BGR: orange-blue mix dark)
-const ACCENT_LIGHT: u32 = 0x00F3F3F3; // light gray card
+const ACCENT_LIGHT: u32 = 0x00F3F3F3; // light gray banner card
 
 const LOREM: &str =
 "END USER LICENSE AGREEMENT — SAMPLE\r\n\r\n\

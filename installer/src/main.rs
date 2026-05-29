@@ -5,8 +5,6 @@ mod install;
 mod payload;
 #[cfg(windows)]
 mod ui_win32;
-#[cfg(windows)]
-mod webview2_detect;
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -36,12 +34,8 @@ fn run() -> Result<()> {
         return run_silent(&loaded, PathBuf::from(path), launch);
     }
     if args.iter().any(|a| a == "--verify") {
-        #[cfg(windows)]
-        let wv2 = webview2_detect::detect();
-        #[cfg(not(windows))]
-        let wv2: Option<String> = None;
         println!(
-            "OK: {} {} -> {} (payload {} bytes verified)\nWebView2 runtime: {}",
+            "OK: {} {} -> {} (payload {} bytes verified)",
             match loaded.payload.kind {
                 common::models::PayloadKind::Full => "FULL",
                 common::models::PayloadKind::Patch => "PATCH",
@@ -49,7 +43,6 @@ fn run() -> Result<()> {
             loaded.payload.from_version.clone().unwrap_or_else(|| "(fresh)".to_string()),
             loaded.payload.to_version,
             loaded.zip_bytes.len(),
-            wv2.unwrap_or_else(|| "not installed (Win32 UI will be used)".to_string()),
         );
         return Ok(());
     }
@@ -57,13 +50,7 @@ fn run() -> Result<()> {
     let default_path = default_install_path(&loaded.payload.product);
 
     #[cfg(windows)]
-    {
-        // WebView2 UI scaffolding — detection only in V1, fall through to Win32.
-        if let Some(_v) = webview2_detect::detect() {
-            // TODO V2: launch webview2_ui::run(loaded, default_path, launch).
-        }
-        ui_win32::run(loaded, default_path, launch)?;
-    }
+    ui_win32::run(loaded, default_path, launch)?;
 
     #[cfg(not(windows))]
     anyhow::bail!("only Windows is supported");

@@ -164,22 +164,18 @@ Files listed in `Manifest.deleted_files` are removed afterwards.
 they are the canonical record of what got installed and double as
 state-required by any subsequent patch installer.
 
-## WebView2
+## UI
 
-The installer detects the WebView2 Evergreen Runtime (registry GUID
-`{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`) at startup. `--verify` prints the
-detected version. The HTML/WebView2 UI front-end itself is **scaffolded but
-not implemented in V1** — the modernized Win32 UI is used in all cases. The
-detection hook is in place so the WebView2 front-end can drop in cleanly
-without touching the rest of the install pipeline.
+Single modernized Win32 UI — no Tauri, no WebView2, no HTML runtime. Common
+Controls v6 visual styles, Segoe UI, DPI-aware `PerMonitorV2`, `asInvoker`
+manifest. Deliberate choice: zero runtime dependencies, every supported
+Windows version works, ~860 KB stub.
 
 ## Limitations / V1 scope
 
 - Windows only.
 - No automatic shortcut / start-menu entry yet (V2).
 - No GUI folder picker on Windows < 7 (we use modern `IFileOpenDialog`).
-- WebView2 front-end not yet wired (detection only). Modernized Win32 native
-  UI is the only renderer in V1.
 - English-only UI.
 - License text is a placeholder (lorem ipsum); the build tool does not yet
   accept a `--license` flag to inject a real EULA.
