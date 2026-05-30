@@ -1,5 +1,7 @@
 mod args;
 mod embed;
+#[cfg(windows)]
+mod icon;
 mod keygen;
 mod pack;
 

@@ -171,6 +171,22 @@ Controls v6 visual styles, Segoe UI, DPI-aware `PerMonitorV2`, `asInvoker`
 manifest. Deliberate choice: zero runtime dependencies, every supported
 Windows version works, ~860 KB stub.
 
+## Icon inheritance
+
+At pack time the builder reads `RT_GROUP_ICON` + every referenced `RT_ICON`
+from `<input>/<exe>` (the app being packaged) via
+`LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE)` and stamps them into both
+`setup-…exe` and the embedded `uninstall.exe` via
+`BeginUpdateResourceW / UpdateResourceW / EndUpdateResourceW`. Result:
+Windows Explorer shows the application's own icon on the installer and
+uninstaller files, and on the Add/Remove Programs entry (the registry
+`DisplayIcon` already points at `uninstall.exe`).
+
+The uninstaller is stamped in a staging copy under `%TEMP%`, then read into
+the installer payload — the cached `target/release/uninstall.exe` is left
+untouched between pack runs. If the source exe has no icon resources, the
+build prints a notice and falls back to the Rust default.
+
 ## Shortcuts
 
 If the payload `manifest.exe` is non-empty, the installer drops two `.lnk`

@@ -70,10 +70,57 @@ pub fn run(args: &PackArgs) -> Result<()> {
     let stub = build_installer_stub(&pub_key_hex, args.reuse_stub)?;
     println!("Stub: {}", stub.display());
 
+    // Pull the icon from the packaged exe (best-effort).
+    #[cfg(windows)]
+    let icons = {
+        let exe_path = args.input.join(&args.exe);
+        if exe_path.exists() {
+            match crate::icon::extract_from_exe(&exe_path) {
+                Ok(Some(i)) => {
+                    println!(
+                        "Icon: {} group + {} sub-icons from {}",
+                        i.group_bytes.len(),
+                        i.icons.len(),
+                        exe_path.display()
+                    );
+                    Some(i)
+                }
+                Ok(None) => {
+                    println!("Icon: source exe {} has no icon resources", exe_path.display());
+                    None
+                }
+                Err(e) => {
+                    eprintln!("warning: icon extraction failed: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    #[cfg(not(windows))]
+    let icons: Option<()> = None;
+
     let uninstaller = build_uninstaller(args.reuse_stub)?;
-    let uninstaller_bytes =
-        fs::read(&uninstaller).with_context(|| format!("read {}", uninstaller.display()))?;
-    println!("Uninstaller: {} ({} bytes)", uninstaller.display(), uninstaller_bytes.len());
+    // Stage uninstaller into %TEMP%, stamp icons there, then read its bytes
+    // for the installer RCDATA payload. Avoids mutating the cached release artifact.
+    let staged_uninstaller = std::env::temp_dir().join(format!(
+        "rustinst-uninst-{}.exe",
+        std::process::id()
+    ));
+    fs::copy(&uninstaller, &staged_uninstaller).with_context(|| {
+        format!("stage uninstaller {} -> {}", uninstaller.display(), staged_uninstaller.display())
+    })?;
+    #[cfg(windows)]
+    if let Some(i) = &icons {
+        if let Err(e) = crate::icon::embed_icons(&staged_uninstaller, i) {
+            eprintln!("warning: icon embed into uninstaller failed: {e:#}");
+        }
+    }
+    let uninstaller_bytes = fs::read(&staged_uninstaller)
+        .with_context(|| format!("read {}", staged_uninstaller.display()))?;
+    let _ = fs::remove_file(&staged_uninstaller);
+    println!("Uninstaller: {} bytes (icon-stamped)", uninstaller_bytes.len());
 
     if let Some(parent) = args.out.parent() {
         fs::create_dir_all(parent)?;
@@ -82,8 +129,15 @@ pub fn run(args: &PackArgs) -> Result<()> {
     println!("Copied stub to {}", args.out.display());
 
     embed::embed_resources(&args.out, &zip_bytes, signed_json.as_bytes(), &uninstaller_bytes)?;
+    #[cfg(windows)]
+    if let Some(i) = &icons {
+        if let Err(e) = crate::icon::embed_icons(&args.out, i) {
+            eprintln!("warning: icon embed into setup failed: {e:#}");
+        }
+    }
     println!(
-        "Embedded payload + signed manifest + uninstaller into {}",
+        "Embedded payload + signed manifest + uninstaller{} into {}",
+        if icons.is_some() { " + icon" } else { "" },
         args.out.display()
     );
 
