@@ -1,11 +1,13 @@
 //! Copy the icon resources from the packaged exe into the installer and
 //! uninstaller .exe so Explorer shows the right thumbnail.
 //!
-//! Strategy: read every `RT_GROUP_ICON` from the source (the user's exe) and
-//! every `RT_ICON` it references via `LoadLibraryExW + LOAD_LIBRARY_AS_DATAFILE`,
-//! then `BeginUpdateResourceW / UpdateResourceW / EndUpdateResourceW` to write
-//! them into the target. RT_RCDATA (our payload) and RT_ICON are different
-//! resource types so they don't collide.
+//! Strategy: copy **every** `RT_GROUP_ICON` and **every** `RT_ICON` from the
+//! source (the user's exe) verbatim, preserving each resource's original
+//! identifier (integer id or string name). This makes the target's icon
+//! resource tree identical to the source, so Windows/Explorer pick exactly the
+//! same application icon — no guessing which group is "the" icon, no rebuilt
+//! group directories that can drift from the source. RT_RCDATA (our payload)
+//! is a different resource type so it never collides.
 
 #![cfg(windows)]
 
@@ -24,16 +26,15 @@ use windows::core::PCWSTR;
 const RT_ICON: u16 = 3;
 const RT_GROUP_ICON: u16 = 14;
 const LANG_NEUTRAL: u16 = 0;
-/// Group-icon resource id we write into the target. Explorer picks the
-/// lowest-id RT_GROUP_ICON for the file's thumbnail, so we always write 1.
-const TARGET_GROUP_ID: u16 = 1;
 
 pub struct ExeIcons {
-    pub group_bytes: Vec<u8>,
-    pub icons: Vec<(u16, Vec<u8>)>,
+    /// Every RT_GROUP_ICON, keyed by its original name/id.
+    pub groups: Vec<(ResName, Vec<u8>)>,
+    /// Every RT_ICON, keyed by its original name/id.
+    pub icons: Vec<(ResName, Vec<u8>)>,
 }
 
-/// Read the first RT_GROUP_ICON from `exe` plus every RT_ICON it references.
+/// Read every icon resource from `exe`, preserving identifiers.
 /// Returns `Ok(None)` if the source exe has no icons (still a success).
 pub fn extract_from_exe(exe: &Path) -> Result<Option<ExeIcons>> {
     let wide: Vec<u16> = exe
@@ -53,40 +54,55 @@ pub fn extract_from_exe(exe: &Path) -> Result<Option<ExeIcons>> {
             bail!("LoadLibraryEx returned null for {}", exe.display());
         }
 
-        let groups = enum_resource_ids(hmod, RT_GROUP_ICON);
-        if groups.is_empty() {
+        let group_names = enum_resource_names(hmod, RT_GROUP_ICON);
+        if group_names.is_empty() {
             let _ = FreeLibrary(hmod);
             return Ok(None);
         }
 
-        // Pick the lowest-numbered group (matches Explorer's heuristic for
-        // which group to use as the file thumbnail).
-        let mut sorted = groups;
-        sorted.sort();
-        let group_id = sorted[0];
+        let mut groups = Vec::with_capacity(group_names.len());
+        for g in &group_names {
+            if let Ok(b) = load_res_named(hmod, RT_GROUP_ICON, g) {
+                groups.push((g.clone(), b));
+            }
+        }
 
-        let group_bytes = load_res(hmod, RT_GROUP_ICON, group_id)?;
-        let icon_ids = parse_group_icon_ids(&group_bytes);
-
-        let mut icons = Vec::with_capacity(icon_ids.len());
-        for id in icon_ids {
-            match load_res(hmod, RT_ICON, id as u32) {
-                Ok(b) => icons.push((id, b)),
-                Err(_) => continue,
+        let icon_names = enum_resource_names(hmod, RT_ICON);
+        let mut icons = Vec::with_capacity(icon_names.len());
+        for ic in &icon_names {
+            if let Ok(b) = load_res_named(hmod, RT_ICON, ic) {
+                icons.push((ic.clone(), b));
             }
         }
 
         let _ = FreeLibrary(hmod);
-        Ok(Some(ExeIcons {
-            group_bytes,
-            icons,
-        }))
+        if groups.is_empty() || icons.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ExeIcons { groups, icons }))
     }
 }
 
-unsafe fn enum_resource_ids(hmod: HMODULE, rt: u16) -> Vec<u32> {
+/// A resource name is either an integer id or a string (MAKEINTRESOURCE vs name).
+#[derive(Clone)]
+pub enum ResName {
+    Int(u16),
+    /// Null-terminated wide string.
+    Name(Vec<u16>),
+}
+
+impl ResName {
+    fn as_pcwstr(&self) -> PCWSTR {
+        match self {
+            ResName::Int(i) => PCWSTR(*i as usize as *const u16),
+            ResName::Name(w) => PCWSTR(w.as_ptr()),
+        }
+    }
+}
+
+unsafe fn enum_resource_names(hmod: HMODULE, rt: u16) -> Vec<ResName> {
     thread_local! {
-        static FOUND: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+        static FOUND: RefCell<Vec<ResName>> = const { RefCell::new(Vec::new()) };
     }
     FOUND.with(|f| f.borrow_mut().clear());
 
@@ -97,9 +113,19 @@ unsafe fn enum_resource_ids(hmod: HMODULE, rt: u16) -> Vec<u32> {
         _l: isize,
     ) -> BOOL {
         let v = name.0 as usize;
-        // IS_INTRESOURCE: high word is 0 → name is an integer ID.
+        // IS_INTRESOURCE: high word zero → integer id; else pointer to a wide string.
         if v >> 16 == 0 {
-            FOUND.with(|f| f.borrow_mut().push(v as u32));
+            FOUND.with(|f| f.borrow_mut().push(ResName::Int(v as u16)));
+        } else {
+            unsafe {
+                let mut len = 0usize;
+                while *name.0.add(len) != 0 {
+                    len += 1;
+                }
+                let mut w: Vec<u16> = std::slice::from_raw_parts(name.0, len).to_vec();
+                w.push(0);
+                FOUND.with(|f| f.borrow_mut().push(ResName::Name(w)));
+            }
         }
         TRUE
     }
@@ -115,48 +141,28 @@ unsafe fn enum_resource_ids(hmod: HMODULE, rt: u16) -> Vec<u32> {
     FOUND.with(|f| f.borrow().clone())
 }
 
-unsafe fn load_res(hmod: HMODULE, rt: u16, id: u32) -> Result<Vec<u8>> {
+unsafe fn load_res_named(hmod: HMODULE, rt: u16, name: &ResName) -> Result<Vec<u8>> {
     unsafe {
         let hres = FindResourceW(
             Some(hmod.into()),
-            PCWSTR(id as usize as *const u16),
+            name.as_pcwstr(),
             PCWSTR(rt as usize as *const u16),
         );
         if hres.is_invalid() {
-            bail!("FindResource type={} id={} missing", rt, id);
+            bail!("FindResource type={} missing", rt);
         }
         let size = SizeofResource(Some(hmod.into()), hres);
         if size == 0 {
-            bail!("SizeofResource id={} returned 0", id);
+            bail!("SizeofResource returned 0");
         }
         let hglobal = LoadResource(Some(hmod.into()), hres).context("LoadResource")?;
         let ptr = LockResource(hglobal);
         if ptr.is_null() {
-            bail!("LockResource id={} returned null", id);
+            bail!("LockResource returned null");
         }
         let slice = std::slice::from_raw_parts(ptr as *const u8, size as usize);
         Ok(slice.to_vec())
     }
-}
-
-/// Parse the GRPICONDIR header and return every nID it references.
-fn parse_group_icon_ids(bytes: &[u8]) -> Vec<u16> {
-    // GRPICONDIR: WORD reserved, WORD type, WORD count, GRPICONDIRENTRY entries[count]
-    // GRPICONDIRENTRY = 14 bytes; last 2 bytes = nID (resource id of RT_ICON).
-    if bytes.len() < 6 {
-        return Vec::new();
-    }
-    let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = 6 + i * 14;
-        if off + 14 > bytes.len() {
-            break;
-        }
-        let id = u16::from_le_bytes([bytes[off + 12], bytes[off + 13]]);
-        out.push(id);
-    }
-    out
 }
 
 pub fn embed_icons(target: &Path, icons: &ExeIcons) -> Result<()> {
@@ -173,27 +179,29 @@ pub fn embed_icons(target: &Path, icons: &ExeIcons) -> Result<()> {
             bail!("BeginUpdateResource invalid handle for {}", target.display());
         }
 
-        for (id, bytes) in &icons.icons {
+        // RT_ICON first, then RT_GROUP_ICON (group references the icons).
+        for (name, bytes) in &icons.icons {
             UpdateResourceW(
                 h,
                 PCWSTR(RT_ICON as usize as *const u16),
-                PCWSTR(*id as usize as *const u16),
+                name.as_pcwstr(),
                 LANG_NEUTRAL,
                 Some(bytes.as_ptr() as *const _),
                 bytes.len() as u32,
             )
-            .with_context(|| format!("UpdateResource RT_ICON id={}", id))?;
+            .context("UpdateResource RT_ICON")?;
         }
-
-        UpdateResourceW(
-            h,
-            PCWSTR(RT_GROUP_ICON as usize as *const u16),
-            PCWSTR(TARGET_GROUP_ID as usize as *const u16),
-            LANG_NEUTRAL,
-            Some(icons.group_bytes.as_ptr() as *const _),
-            icons.group_bytes.len() as u32,
-        )
-        .context("UpdateResource RT_GROUP_ICON")?;
+        for (name, bytes) in &icons.groups {
+            UpdateResourceW(
+                h,
+                PCWSTR(RT_GROUP_ICON as usize as *const u16),
+                name.as_pcwstr(),
+                LANG_NEUTRAL,
+                Some(bytes.as_ptr() as *const _),
+                bytes.len() as u32,
+            )
+            .context("UpdateResource RT_GROUP_ICON")?;
+        }
 
         EndUpdateResourceW(h, false).context("EndUpdateResource")?;
     }

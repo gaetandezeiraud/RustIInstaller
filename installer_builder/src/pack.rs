@@ -92,8 +92,8 @@ pub fn run(args: &PackArgs) -> Result<()> {
             match crate::icon::extract_from_exe(&exe_path) {
                 Ok(Some(i)) => {
                     println!(
-                        "Icon: {} group + {} sub-icons from {}",
-                        i.group_bytes.len(),
+                        "Icon: {} group(s) + {} icon(s) copied from {}",
+                        i.groups.len(),
                         i.icons.len(),
                         exe_path.display()
                     );
