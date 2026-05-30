@@ -10,3 +10,5 @@ products
 /log_err.txt
 /errs.txt
 *.exe.tmp
+log_err.txt
+log_out.txt
